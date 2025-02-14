@@ -4,6 +4,7 @@ import difflib
 from pywinauto import Application, Desktop
 import publisher
 import re
+import csv
 
 def beep():
     """Plays a beep sound."""
@@ -27,8 +28,8 @@ def find_fiatfeed_pid():
     return None
 
 
+import csv
 import re
-
 
 def extract_first_news_item(text):
     """
@@ -37,61 +38,99 @@ def extract_first_news_item(text):
     If found, it returns text from the beginning up to the second time stamp.
     Otherwise, returns the full text.
     """
-    # Regular expression for a time stamp in the format xx:xx:xx.
     pattern = re.compile(r'\b\d{2}:\d{2}:\d{2}\b')
     matches = list(pattern.finditer(text))
     if len(matches) >= 2:
-        # Return text from the start until the start of the second time stamp.
         return text[:matches[1].start()].strip()
     else:
         return text.strip()
 
+def yield_descendants(element):
+    """
+    A generator that recursively yields descendant controls of the given element.
+    """
+    try:
+        children = element.children()
+    except Exception:
+        children = []
+    for child in children:
+        yield child
+        yield from yield_descendants(child)
+
+def get_nth_descendant(window, target_index):
+    """
+    Walks through the descendant controls using a generator and returns
+    the control at the given target index, stopping early if possible.
+    """
+    count = 0
+    for ctrl in yield_descendants(window):
+        if count == target_index:
+            return ctrl
+        count += 1
+    return None
 
 def get_news_feed_text(window, debug=False):
     """
-    Retrieves the text from the control at rank 262, assumed to contain the news feed headline.
+    Retrieves the text from the control at rank 119, assumed to contain the news feed headline.
     It further extracts only the first news item using a heuristic based on time stamps.
 
-    If debug is True, it prints details (rank, class, and text) for all controls.
+    If debug is True, it writes details (rank, class, and text) for all controls with class 'Static' or 'GroupBox'
+    into a CSV file named 'debug_controls.csv'.
 
     Parameters:
         window: The window object to inspect.
-        debug: A boolean flag to print debug information.
+        debug: A boolean flag to output debug information.
 
     Returns:
-        A string containing the first news item from the control at rank 262.
+        A string containing the first news item from the control at rank 119.
     """
-    controls = window.descendants()
+    target_rank = 117
 
-    # Debug mode: list all controls with their rank, class, and text.
     if debug:
-        print("Debug: Listing all controls and their details:")
-        for i, ctrl in enumerate(controls):
-            try:
-                class_name = ctrl.friendly_class_name()
-            except Exception:
-                class_name = "Unknown"
-            try:
-                text = ctrl.window_text().strip()
-            except Exception:
-                text = ""
-            print(f"Rank {i}: Class: {class_name} | Text: {text}")
+        # In debug mode, enumerate all controls and write those of interest to a CSV file.
+        controls = window.descendants()
+        debug_filename = "debug_controls.csv"
+        with open(debug_filename, mode="w", newline='', encoding="utf-8") as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_writer.writerow(["Rank", "Class", "Text"])
+            for i, ctrl in enumerate(controls):
+                try:
+                    class_name = ctrl.friendly_class_name()
+                except Exception:
+                    class_name = "Unknown"
+                if class_name not in ("Static", "GroupBox"):
+                    continue
+                try:
+                    text = ctrl.window_text().strip()
+                except Exception:
+                    text = ""
+                csv_writer.writerow([i, class_name, text])
+        print(f"Debug information written to {debug_filename}.")
 
-    # Check if there are enough controls.
-    if len(controls) <= 262:
-        print("Warning: Not enough controls to access rank 262.")
-        return ""
+        if len(controls) <= target_rank:
+            print(f"Warning: Not enough controls to access rank {target_rank}.")
+            return ""
+        try:
+            headline_text = controls[target_rank].window_text().strip()
+        except Exception as e:
+            print(f"Error retrieving text from rank {target_rank}: {e}")
+            return ""
+    else:
+        # In non-debug mode, use the generator to stop as soon as the target control is reached.
+        ctrl = get_nth_descendant(window, target_rank)
+        if ctrl is None:
+            print(f"Warning: Not enough controls to access rank {target_rank}.")
+            return ""
+        try:
+            headline_text = ctrl.window_text().strip()
+        except Exception as e:
+            print(f"Error retrieving text from rank {target_rank}: {e}")
+            return ""
 
-    try:
-        # Retrieve the text from the control at rank 262.
-        headline_text = controls[262].window_text().strip()
-    except Exception as e:
-        print(f"Error retrieving text from rank 262: {e}")
-        return ""
-
-    # Apply the heuristic to extract only the first news item.
+    # Extract only the first news item using the heuristic.
     first_news = extract_first_news_item(headline_text)
     return first_news
+
 
 
 def monitor_fiatfeed_window():
