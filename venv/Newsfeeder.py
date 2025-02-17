@@ -4,12 +4,19 @@ import csv
 import datetime
 import logging
 from pywinauto import Application, Desktop
+import time
+import winsound
+import csv
+import datetime
+import logging
+import re
+from pywinauto import Application, Desktop
 
 ###################################################################
 # Configuration
 ###################################################################
 POLL_INTERVAL = 0.5  # seconds between checks for feed updates
-WINDOW_TITLE = "FIATFEED"  # Title of the window you're looking for
+WINDOW_TITLE = "FIATFEED"  # Title substring for the FIATFEED window
 
 ###################################################################
 # Logging Setup
@@ -17,13 +24,13 @@ WINDOW_TITLE = "FIATFEED"  # Title of the window you're looking for
 logging.basicConfig(
     filename="fiatfeed_monitor.log",
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(message)s"
 )
 
 
 def log(message):
     """
-    Prints a message to console and also logs it to fiatfeed_monitor.log.
+    Prints a message to the console and also logs it to fiatfeed_monitor.log.
     """
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
@@ -34,16 +41,14 @@ def log(message):
 # Utility Functions
 ###################################################################
 def beep():
-    """
-    Plays a short beep sound to indicate a news feed update.
-    """
+    """Plays a short beep sound to indicate a news feed update."""
     winsound.Beep(550, 200)
 
 
 def find_fiatfeed_pid():
     """
-    Scans all top-level windows and returns the PID of the first window
-    whose title contains the string in WINDOW_TITLE.
+    Scans all top-level windows and returns the PID of the first one
+    whose title contains WINDOW_TITLE.
     """
     for w in Desktop(backend="uia").windows():
         try:
@@ -58,10 +63,9 @@ def find_fiatfeed_pid():
 
 def dump_controls_to_csv(window, filename="all_controls_debug.csv"):
     """
-    Enumerates all controls in the 'window' and writes them to a CSV:
-    Rank, ClassName, ControlText
-
-    This helps you see which rank (index) each control has.
+    Enumerates all controls in 'window' and writes them to a CSV:
+      Rank, ClassName, ControlText
+    This helps you see which index each control has.
     """
     log(f"Dumping all controls to CSV: {filename} ...")
     controls = window.descendants()
@@ -86,14 +90,14 @@ def dump_controls_to_csv(window, filename="all_controls_debug.csv"):
 
 def pick_control_by_rank(window):
     """
-    Asks the user to enter a rank (0-based index) from the controls in the CSV,
-    then returns the corresponding control. If the rank is invalid, tries again;
-    if 'cancel', returns None.
+    Asks the user which rank they want to monitor.
+    The user can consult all_controls_debug.csv to find the rank.
+    If 'cancel', returns None.
     """
     controls = window.descendants()
 
     while True:
-        rank_str = input("Enter the rank (index) of the control to monitor (or 'cancel' to exit): ").strip().lower()
+        rank_str = input("Enter the rank (0-based index) of the control to monitor (or 'cancel'): ").strip().lower()
         if rank_str == "cancel":
             return None
 
@@ -103,6 +107,7 @@ def pick_control_by_rank(window):
                 control = controls[rank]
                 log(f"Selected control rank {rank}.")
 
+                # Log some info for confirmation
                 class_name = "Unknown"
                 try:
                     class_name = control.friendly_class_name()
@@ -115,7 +120,7 @@ def pick_control_by_rank(window):
                 except Exception:
                     pass
 
-                log(f"Control info -> Class: {class_name}, Text: {text_preview[:300]}")
+                log(f"Control info -> Class: {class_name}, Text snippet: {text_preview[:200]}")
 
                 confirm = input("Is this the correct control to monitor? (yes/no): ").strip().lower()
                 if confirm == "yes":
@@ -124,93 +129,116 @@ def pick_control_by_rank(window):
                 else:
                     log(f"User rejected control rank {rank}.")
             else:
-                log(f"Invalid rank: {rank_str}. Must be between 0 and {len(controls) - 1}.")
+                log(f"Invalid rank: {rank}. Must be between 0 and {len(controls) - 1}.")
         except ValueError:
-            log(f"Could not parse rank: {rank_str}. Please enter a valid integer.")
+            log(f"Could not parse rank: {rank_str}. Please enter a valid integer or 'cancel'.")
+
+
+###################################################################
+# Set-based approach to avoid re-logging lines we already saw
+###################################################################
+# Regular expression to remove a leading timestamp (format HH:MM:SS)
+time_regex = re.compile(r"^\d{2}:\d{2}:\d{2}\s+(.*)")
+
+import re
+
+def extract_latest_headline(full_text):
+    """
+    Given the full text of the control, split it into lines and return the first line
+    that starts with a timestamp (e.g., "03:17:43"). Returns None if no such line is found.
+    """
+    for line in full_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Check if the line begins with a timestamp in the format HH:MM:SS
+        m = re.match(r"^\d{2}:\d{2}:\d{2}\s+(.*)", line)
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def monitor_control(control, main_window):
     """
-    Continuously polls 'control' for text changes.
-    If the text changes, beep and log it to fiatfeed_news.csv with a timestamp.
-
-    Displays a simple spinner in the console instead of spamming logs
-    for 'No change detected' every half second.
+    Polls 'control' for text changes every POLL_INTERVAL.
+    It uses extract_latest_headline() to extract the headline (i.e. the first line with a timestamp).
     """
-    # We'll track a simple rotating spinner in the console.
-    spinner = ['|', '/', '-', '\\']
-    spinner_idx = 0
+    last_headline = None
+    spinner_frames = ['|', '/', '-', '\\']
+    spinner_index = 0
 
+    # Initialize last_headline using the current control text.
     try:
-        last_text = control.window_text().strip()
+        initial_text = control.window_text()
+        last_headline = extract_latest_headline(initial_text)
     except Exception as e:
         log(f"Error retrieving initial text from control: {e}")
-        last_text = ""
 
-    log("Beginning to monitor this control for text changes...")
+    log("Beginning to monitor this control for new headlines...")
 
     while True:
         time.sleep(POLL_INTERVAL)
 
-        # If the entire window is gone, let's stop.
         if not main_window.exists():
-            log(f"{WINDOW_TITLE} window no longer exists. Monitoring loop will stop.")
+            log(f"Window '{WINDOW_TITLE}' no longer exists. Stopping monitoring.")
             break
 
-        # Try reading from the control
         try:
-            current_text = control.window_text().strip()
+            current_text = control.window_text()
         except Exception as e:
-            log(f"Unable to read from control, probably gone: {e}")
+            log(f"Unable to read from control (probably destroyed): {e}")
             break
 
-        if current_text != last_text:
-            beep()
-            log("Feed text changed!")
-            log(f"Full updated text:\n{current_text}")
+        current_headline = extract_latest_headline(current_text)
+        if current_headline is None:
+            # If we couldn't extract a headline, continue monitoring.
+            continue
 
-            # Log to CSV with the script's timestamp
+        if current_headline != last_headline:
+            beep()
+            log(f"New headline detected: {current_headline}")
             stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open("fiatfeed_news.csv", "a", newline="", encoding="utf-8") as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow([stamp, current_text])
-
-            last_text = current_text
+                writer.writerow([stamp, current_headline])
+            last_headline = current_headline
         else:
-            # Instead of logging "No change detected", we display a spinner
-            print(f"Monitoring {spinner[spinner_idx]}", end='\r', flush=True)
-            spinner_idx = (spinner_idx + 1) % len(spinner)
+            # Show a spinner to indicate activity
+            spinner_char = spinner_frames[spinner_index]
+            print(f"Monitoring {spinner_char}", end='\r', flush=True)
+            spinner_index = (spinner_index + 1) % len(spinner_frames)
+
 
 
 def monitor_fiatfeed_window():
     """
     Main routine:
-      1) Attach to the FIATFEED window (by title).
-      2) Dump controls to a debug CSV so you can see them.
-      3) Prompt you for the rank of the control to monitor.
-      4) Monitor that single control for changes (if any).
+      1) Attach to FIATFEED window.
+      2) Dump controls to debug CSV so you can see them.
+      3) Prompt for which rank to monitor.
+      4) Monitor that control, logging only brand-new lines we haven't seen before.
     """
     pid = find_fiatfeed_pid()
     if not pid:
-        log(f"{WINDOW_TITLE} window not found. Exiting monitoring function.")
+        log(f"No window found matching '{WINDOW_TITLE}'. Exiting.")
         return
 
     try:
         app = Application(backend="uia").connect(process=pid)
         main_window = app.window(title=WINDOW_TITLE)
-        log(f"{WINDOW_TITLE} window attached successfully.")
+        log(f"Attached to '{WINDOW_TITLE}' window successfully.")
     except Exception as e:
-        log(f"Error attaching to {WINDOW_TITLE} window: {e}")
+        log(f"Error attaching to '{WINDOW_TITLE}' window: {e}")
         return
 
-    log("Waiting for the UI to populate completely...")
+    log("Waiting a moment for the UI to populate...")
     time.sleep(2)
 
     dump_controls_to_csv(main_window, filename="all_controls_debug.csv")
 
     control = pick_control_by_rank(main_window)
     if not control:
-        log("No control selected for monitoring. Exiting.")
+        log("No control chosen; exiting.")
         return
 
     monitor_control(control, main_window)
@@ -218,19 +246,19 @@ def monitor_fiatfeed_window():
 
 def main():
     """
-    Keeps looking for the FIATFEED window every 5 seconds.
-    If found, you can pick a control rank to monitor for text changes.
+    Keeps checking for the FIATFEED window every 5 seconds.
+    Once found, do the routine and wait until it ends.
     """
-    log(f"Starting {WINDOW_TITLE} auto-monitor. Waiting for {WINDOW_TITLE} window to appear...")
+    log(f"Starting {WINDOW_TITLE} auto-monitor. Waiting for '{WINDOW_TITLE}' window to appear...")
 
     while True:
         pid = find_fiatfeed_pid()
         if pid:
-            log(f"{WINDOW_TITLE} window detected. Starting monitoring...")
+            log(f"Detected '{WINDOW_TITLE}' window. Beginning monitoring routine...")
             monitor_fiatfeed_window()
-            log("Monitoring stopped. Will wait for window to reappear...")
+            log("Monitoring ended. Will wait for window to reappear...")
         else:
-            log(f"{WINDOW_TITLE} window not found. Retrying in 5 seconds...")
+            log(f"'{WINDOW_TITLE}' window not found. Retrying in 5 seconds...")
         time.sleep(5)
 
 

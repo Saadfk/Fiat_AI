@@ -1,0 +1,14 @@
+import subprocess
+import sys
+
+# List your script names here.
+scripts = ['Newsfeeder.py', 'publisher.py', 'discord_mt.py']
+
+# Start all scripts concurrently.
+processes = [subprocess.Popen([sys.executable, script]) for script in scripts]
+
+# Wait for all processes to finish.
+for process in processes:
+    process.wait()
+
+print("All scripts have been executed concurrently.")
