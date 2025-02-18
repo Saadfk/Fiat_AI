@@ -2,7 +2,7 @@ import subprocess
 import sys
 
 # List your script names here.
-scripts = ['Newsfeeder.py', 'publisher.py', 'discord_mt.py']
+scripts = [ 'publisher.py', 'discord_mt.py', 'WSBSENTIMENT CHECK.py', 'Newsfeeder.py']
 
 # Start all scripts concurrently.
 processes = [subprocess.Popen([sys.executable, script]) for script in scripts]
