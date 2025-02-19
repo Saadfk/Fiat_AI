@@ -4,171 +4,127 @@ import csv
 import datetime
 import logging
 import re
+import requests
 from pywinauto import Application, Desktop
+from Keys import DISCORD_BOT_TOKEN, NOTEBOOK_CHANNEL_ID
 
-###################################################################
-# Configuration
-###################################################################
-POLL_INTERVAL = 0.5  # seconds between checks for feed updates
-WINDOW_TITLE = "FIATFEED"  # Title substring for the FIATFEED window
-
-# Maximum number of attempts for reconnecting to the FIATFEED window
+# Configuration constants
+POLL_INTERVAL = 0.5
+WINDOW_TITLE = "FIATFEED"
 MAX_ATTEMPTS = 10
 
-###################################################################
-# Logging Setup (only one instance now)
-###################################################################
+# Logging setup
 logging.basicConfig(
     filename="fiatfeed_monitor.log",
     level=logging.INFO,
     format="%(asctime)s - %(message)s"
 )
 
-
 def log(message):
-    """
-    Prints a message to the console and also logs it.
-    """
+    """Log a message to console and file."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
     logging.info(message)
 
-
-###################################################################
-# Utility Functions
-###################################################################
 def beep():
-    """Plays a short beep sound to indicate a news feed update."""
+    """Play a beep sound to signal an update."""
     winsound.Beep(550, 200)
 
-
 def find_fiatfeed_pid():
-    """
-    Scans all top-level windows and returns the PID of the first one
-    whose title contains WINDOW_TITLE.
-    """
+    """Return the PID of the window containing WINDOW_TITLE."""
     for w in Desktop(backend="uia").windows():
         try:
             if WINDOW_TITLE in w.window_text():
                 pid = w.process_id()
-                log(f"Found {WINDOW_TITLE} window: '{w.window_text()}' with PID: {pid}")
+                log(f"Found '{w.window_text()}' with PID {pid}.")
                 return pid
         except Exception:
             continue
     return None
 
+# --- Headline Extraction ---
 
-###################################################################
-# Headline Extraction Helper Functions
-###################################################################
 def is_all_upper(text):
-    """
-    Returns True if all alphabetic characters in text are uppercase.
-    Non-alphabetic characters are ignored.
-    """
+    """Return True if all alphabetic characters are uppercase."""
     filtered = ''.join(c for c in text if c.isalpha())
-    return bool(filtered) and (filtered == filtered.upper())
-
+    return bool(filtered) and filtered == filtered.upper()
 
 def words_mostly_upper(text, threshold=0.75):
-    """
-    Splits text into words, removes non-alpha characters from each,
-    and returns a tuple (bool, ratio) where bool indicates whether at least
-    'threshold' fraction of the words are entirely uppercase.
-    """
+    """Return True if at least threshold fraction of words are fully uppercase."""
     words = text.split()
     if not words:
         return False, 0.0
-    count = 0
-    for word in words:
-        clean = ''.join(c for c in word if c.isalpha())
-        if clean and (clean == clean.upper()):
-            count += 1
+    count = sum(1 for word in words if ''.join(c for c in word if c.isalpha()) == ''.join(c for c in word if c.isalpha()).upper())
     ratio = count / len(words)
-    return (ratio >= threshold), ratio
-
+    return ratio >= threshold, ratio
 
 def extract_headline(full_text):
     """
-    Extracts the first headline candidate from full_text that matches our heuristic.
-
-    Instead of relying on newline splits, it uses a regex to locate any timestamp
-    (in the form HH:MM:SS) followed by text until the next timestamp.
-
-    For each candidate:
-      - It is rejected if it has fewer than 5 words.
-      - It is accepted immediately if all alphabetic characters are uppercase.
-      - Otherwise, if at least 75% of its words are entirely uppercase, it is accepted.
-
-    Detailed logging is performed for each candidate.
+    Extract the first headline candidate from full_text.
+    A candidate is defined as text following a timestamp (HH:MM:SS) that has at least 5 words
+    and is either entirely uppercase or at least 75% uppercase.
     """
-    import re
-    # This pattern finds a timestamp followed by any text until the next timestamp.
     pattern = re.compile(r'(\d{2}:\d{2}:\d{2})\s+((?:(?!\d{2}:\d{2}:\d{2}).)+)', re.DOTALL)
     candidates = pattern.findall(full_text)
-
-    for timestamp, candidate in candidates:
+    for _, candidate in candidates:
         candidate = candidate.strip()
-        words = candidate.split()
-        log(f"Candidate from timestamp {timestamp}: '{candidate}' | Word count: {len(words)}")
-        if len(words) < 5:
-            log("Candidate rejected: less than 5 words.")
+        if len(candidate.split()) < 5:
             continue
-
         if is_all_upper(candidate):
-            log("Candidate accepted via is_all_upper check.")
             return candidate
-
-        passes, ratio = words_mostly_upper(candidate, threshold=0.75)
-        log(f"Candidate uppercase word ratio: {ratio:.2f}")
+        passes, _ = words_mostly_upper(candidate, threshold=0.75)
         if passes:
-            log("Candidate accepted via words_mostly_upper check.")
             return candidate
-        else:
-            log("Candidate rejected: not enough uppercase words.")
-
-    log("extract_headline: No headline matching the heuristic was found.")
     return None
 
+# --- Discord and CSV Logging ---
 
-###################################################################
-# Revised Monitoring Function
-###################################################################
+def post_to_discord(message):
+    """Post the given message to the Discord channel using the Bot token."""
+    url = f"https://discord.com/api/v9/channels/{NOTEBOOK_CHANNEL_ID}/messages"
+    headers = {
+        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    payload = {"content": message}
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+    except Exception as e:
+        log(f"Failed to post to Discord: {e}")
+
+def log_headline_to_csv(headline):
+    """Append a timestamped headline to headlines.csv."""
+    with open("headlines.csv", "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), headline])
+
+# --- Monitoring Routine ---
+
 def monitor_control(control, main_window):
-    """
-    Continuously polls 'control' for text changes every POLL_INTERVAL.
-    On detecting any new lines, beeps, logs them, and dumps the entire control text
-    to control_dump.csv for debugging. Also tries to extract a headline using the heuristic.
-    """
+    """Poll the control for updates, extract headlines, log and post them."""
     spinner_frames = ['|', '/', '-', '\\']
     spinner_index = 0
     seen_lines = set()
 
-    # Initialize seen_lines with the current control text.
     try:
         initial_text = control.window_text()
-        for line in initial_text.splitlines():
-            if line.strip():
-                seen_lines.add(line)
+        seen_lines.update(line for line in initial_text.splitlines() if line.strip())
     except Exception as e:
-        log(f"Error retrieving initial text from control: {e}")
+        log(f"Error reading initial text: {e}")
 
-    log("Beginning to monitor this control for new lines (beep on any change)...")
-
+    log("Monitoring control for updates...")
     while True:
         time.sleep(POLL_INTERVAL)
-
         if not main_window.exists():
             log(f"Window '{WINDOW_TITLE}' no longer exists. Stopping monitoring.")
             break
-
         try:
             current_text = control.window_text()
         except Exception as e:
-            log(f"Unable to read from control (probably destroyed): {e}")
+            log(f"Error reading control: {e}")
             break
 
-        # Detect new lines using a set-based approach.
         current_lines = [line for line in current_text.splitlines() if line.strip()]
         new_lines = [ln for ln in current_lines if ln not in seen_lines]
         for ln in new_lines:
@@ -176,107 +132,74 @@ def monitor_control(control, main_window):
 
         if new_lines:
             beep()
-            log("Feed text changed! Newly found lines:")
-            for ln in new_lines:
-                log(f"[NEW] {ln}")
-            # Dump the entire control text to control_dump.csv for debugging
+            # Dump complete control text for later analysis
             try:
                 with open("control_dump.csv", "a", newline="", encoding="utf-8") as f:
                     writer = csv.writer(f)
                     writer.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
                     for line in current_text.splitlines():
                         writer.writerow([line])
-                    writer.writerow([])  # Separator row
-                log("Control text dumped to control_dump.csv")
+                    writer.writerow([])  # separator
             except Exception as e:
                 log(f"Error dumping control text: {e}")
 
-            # Attempt to extract a headline (heuristic may need further adjustment)
             headline = extract_headline(current_text)
             if headline:
                 log(f"Extracted headline: {headline}")
+                log_headline_to_csv(headline)
+                #post_to_discord(headline)
             else:
-                log("No valid headline extracted using the heuristic.")
+                log("No valid headline extracted.")
         else:
-            # Display a spinner to indicate activity.
-            spinner_char = spinner_frames[spinner_index]
-            print(f"Monitoring {spinner_char}", end='\r', flush=True)
+            print(f"Monitoring {spinner_frames[spinner_index]}", end='\r', flush=True)
             spinner_index = (spinner_index + 1) % len(spinner_frames)
 
-
-###################################################################
-# Window Monitoring Routine
-###################################################################
 def monitor_fiatfeed_window():
-    """
-    Main routine:
-      1) Attaches to the FIATFEED window.
-      2) Confirms the PID with the user.
-      3) Automatically selects control rank 3.
-      4) Monitors that control for changes.
-    """
+    """Attach to the FIATFEED window, select control, and start monitoring."""
     pid = find_fiatfeed_pid()
     if not pid:
         log(f"No window found matching '{WINDOW_TITLE}'. Exiting.")
         return
 
-    # Confirm the PID with the user
-    confirm = input(f"Found FIATFEED window with PID {pid}. Proceed? (yes/no): ").strip().lower()
-    if confirm != "yes":
-        log("User did not confirm PID. Exiting monitoring routine.")
+    if input(f"Found FIATFEED window with PID {pid}. Proceed? (yes/no): ").strip().lower() != "yes":
+        log("User canceled. Exiting.")
         return
 
     try:
         app = Application(backend="uia").connect(process=pid)
         main_window = app.window(title_re=".*" + WINDOW_TITLE + ".*")
-        log(f"Attached to '{WINDOW_TITLE}' window successfully.")
     except Exception as e:
-        log(f"Error attaching to '{WINDOW_TITLE}' window: {e}")
+        log(f"Error attaching to window: {e}")
         return
 
-    log("Waiting a moment for the UI to populate...")
-    time.sleep(2)
-
-    # Automatically select control rank 3
+    time.sleep(2)  # Allow UI to populate
     try:
         controls = main_window.descendants()
         if len(controls) > 3:
             control = controls[3]
-            log("Automatically selected default control at rank 3.")
         else:
             log("Not enough controls found to select rank 3. Exiting.")
             return
     except Exception as e:
-        log(f"Error selecting default control: {e}")
+        log(f"Error selecting control: {e}")
         return
 
     monitor_control(control, main_window)
 
-
-###################################################################
-# Main Routine with Graceful Reconnection
-###################################################################
 def main():
-    """
-    Keeps checking for the FIATFEED window every 5 seconds.
-    If found, confirms with the user and runs the monitoring routine.
-    If the window is not found for MAX_ATTEMPTS consecutive times, exits.
-    """
-    log(f"Starting {WINDOW_TITLE} auto-monitor. Waiting for '{WINDOW_TITLE}' window to appear...")
+    """Main loop: monitor FIATFEED window and reconnect if necessary."""
+    log(f"Starting {WINDOW_TITLE} auto-monitor.")
     attempts = 0
     while attempts < MAX_ATTEMPTS:
         pid = find_fiatfeed_pid()
         if pid:
-            log(f"Detected '{WINDOW_TITLE}' window. Beginning monitoring routine...")
             monitor_fiatfeed_window()
-            log("Monitoring ended. Will wait for window to reappear...")
-            attempts = 0  # reset attempts after a successful connection
+            attempts = 0  # Reset on success
         else:
             attempts += 1
-            log(f"'{WINDOW_TITLE}' window not found. Retrying in 5 seconds... (Attempt {attempts}/{MAX_ATTEMPTS})")
+            log(f"Window '{WINDOW_TITLE}' not found. Attempt {attempts}/{MAX_ATTEMPTS}.")
         time.sleep(5)
-    log("Max attempts reached. Exiting the monitor.")
-
+    log("Max attempts reached. Exiting monitor.")
 
 if __name__ == "__main__":
     main()

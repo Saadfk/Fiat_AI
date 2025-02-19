@@ -6,6 +6,7 @@ from Keys import DISCORD_BOT_TOKEN, NOTEBOOK_CHANNEL_ID, Linkedin_Access_Token, 
 # Additional Discord Channel IDs
 ADDITIONAL_CHANNEL_ID_1 = 1323659231064490044
 TARGET_CHANNEL_ID = 855359994547011604
+ADDITIONAL_CHANNEL_ID_2 = 1341449447653118059
 
 
 def split_into_chunks(content, chunk_size=280):
@@ -91,7 +92,7 @@ class DiscordClient(discord.Client):
         print(f"Logged in as {self.user}")
 
     async def on_message(self, message):
-        if message.channel.id in [int(NOTEBOOK_CHANNEL_ID), ADDITIONAL_CHANNEL_ID_1]:
+        if message.channel.id in [int(NOTEBOOK_CHANNEL_ID), ADDITIONAL_CHANNEL_ID_1, ADDITIONAL_CHANNEL_ID_2]:
             content = message.content
             print(f"New message in channel {message.channel.id}: {content}")
 
