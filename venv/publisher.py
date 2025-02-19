@@ -100,7 +100,7 @@ class DiscordClient(discord.Client):
             target_channel = self.get_channel(TARGET_CHANNEL_ID)
             if target_channel:
                 await target_channel.send(content)
-            if message.channel.id == int(NOTEBOOK_CHANNEL_ID):
+            if message.channel.id == int(NOTEBOOK_CHANNEL_ID) or int(ADDITIONAL_CHANNEL_ID_2):
                 # Post to LinkedIn
                 post_to_linkedin(content)
 
