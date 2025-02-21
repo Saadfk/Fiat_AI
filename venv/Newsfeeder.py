@@ -161,9 +161,9 @@ def monitor_fiatfeed_window():
         log(f"No window found matching '{WINDOW_TITLE}'. Exiting.")
         return
 
-    if input(f"Found FIATFEED window with PID {pid}. Proceed? (yes/no): ").strip().lower() != "yes":
-        log("User canceled. Exiting.")
-        return
+    # if input(f"Found FIATFEED window with PID {pid}. Proceed? (yes/no): ").strip().lower() != "yes":
+    #     log("User canceled. Exiting.")
+    #     return
 
     try:
         app = Application(backend="uia").connect(process=pid)
