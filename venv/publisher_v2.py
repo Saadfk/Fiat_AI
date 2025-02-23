@@ -1,127 +1,199 @@
+"""
+Monitors headlines on the "Breaking News - The Fly" page by dumping the entire HTML every 3 seconds
+and parsing it with BeautifulSoup, while avoiding duplicates that are already in flylines.csv.
+
+Steps:
+1) Attaches to the correct tab in Chrome (which must be running with --remote-debugging-port=9222).
+2) Loads existing headlines from flylines.csv so we never re-publish duplicates.
+3) Every 3 seconds:
+   - Evaluates document.documentElement.outerHTML
+   - Parses the HTML with BeautifulSoup
+   - Finds all <a class="newsTitleLink"> elements
+   - Checks for new headlines (not in CSV)
+   - Writes them to flylines.csv with timestamps
+4) Emits a beep on Windows if an error occurs (and tries to recover).
+5) Prints debug messages to the console, including a short HH:MM timestamp for new headlines.
+"""
+
 import os
+import pychrome
 import time
-import csv
-import requests
 import datetime
+import csv
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
+from bs4 import BeautifulSoup
 
-# Import your bot token from Keys.py
-from Keys import DISCORD_BOT_TOKEN
-
-# ID of the Discord channel where you want to post new lines
-DISCORD_CHANNEL_ID = 855359994547011604
-
-# CSV files we want to watch (in the same directory as this script)
-CSV_FILES_TO_WATCH = ["headlines.csv", "flylines.csv"]
+# For Windows beep
+try:
+    import winsound
+    HAVE_WINSOUND = True
+except ImportError:
+    HAVE_WINSOUND = False
 
 
-def post_to_discord(channel_id, message):
+def beep_error():
+    """Emit a triple beep sequence on Windows to alert of an error."""
+    if not HAVE_WINSOUND:
+        print("ERROR: winsound not available on this platform. Cannot beep.")
+        return
+    for _ in range(3):
+        winsound.Beep(1000, 500)  # frequency=1000 Hz, duration=500 ms
+        time.sleep(0.1)
+
+
+def attach_to_fly_tab(browser, target_title="Breaking News - The Fly"):
     """
-    Sends a message to a given Discord channel using the Bot API.
-    Requires DISCORD_BOT_TOKEN.
+    Searches through all tabs, briefly attaching to each to check document.title.
+    If we find the correct one, we stay attached and do NOT stop() it.
+    Raises RuntimeError if not found.
     """
-    url = f"https://discord.com/api/channels/{channel_id}/messages"
-    headers = {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {"content": message}
+    tabs = browser.list_tab()
+    print(f"DEBUG: Found {len(tabs)} tabs in this Chrome instance.")
 
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code not in (200, 201):
-        print(f"ERROR posting to Discord: {response.status_code} {response.text}")
+    for t in tabs:
+        try:
+            t.start()
+            t.call_method("Runtime.enable")
+            # Check the page title
+            result = t.call_method("Runtime.evaluate", expression="document.title")
+            doc_title = result.get("result", {}).get("value", "")
+            print(f"DEBUG: Tab ID={t.id}, Title={doc_title}")
+
+            if target_title in doc_title:
+                print("DEBUG: Found the correct tab. Staying attached.")
+                return t  # We do NOT call t.stop() here, so we remain attached.
+
+            # Not the correct tab, so detach
+            t.stop()
+
+        except Exception as e:
+            print(f"DEBUG: Error checking tab ID={t.id} -> {e}")
+            try:
+                t.stop()
+            except:
+                pass
+
+    raise RuntimeError(f"Could not locate a tab titled '{target_title}'")
 
 
-class MultiCSVHandler(FileSystemEventHandler):
+def dump_full_html(tab):
     """
-    A FileSystemEventHandler that tracks multiple CSV files for appended lines.
-    For each file, we store how many bytes we've read so far.
-    When a file is modified, we only read the newly added lines.
+    Uses pychrome to evaluate document.documentElement.outerHTML
+    and returns the entire HTML as a string.
     """
-    def __init__(self, csv_files):
-        super().__init__()
-        self.csv_files = csv_files
+    js_code = "document.documentElement.outerHTML"
+    result = tab.call_method("Runtime.evaluate", expression=js_code)
+    html_content = result.get("result", {}).get("value", "")
+    return html_content
 
-        # Track the file offsets so we only read truly new lines
-        self.file_offsets = {}
-        for f in csv_files:
-            if os.path.exists(f):
-                # Start from the end of the file so we don't re-process old lines
-                self.file_offsets[f] = os.path.getsize(f)
-            else:
-                self.file_offsets[f] = 0
 
-    def on_modified(self, event):
-        """
-        Called by watchdog whenever a file in the watched directory is modified.
-        We only care if it's one of our CSV files.
-        """
-        file_path = os.path.abspath(event.src_path)
-        file_name = os.path.basename(file_path)
+def parse_headlines_from_html(html_text):
+    """
+    Given a string of HTML, parse it with BeautifulSoup and return
+    a list of headlines found in <a class="newsTitleLink">.
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    headline_links = soup.select('a.newsTitleLink')
+    headlines = []
+    for link in headline_links:
+        text = link.get_text(strip=True)
+        if text:
+            headlines.append(text)
+    return headlines
 
-        if file_name in self.csv_files:
-            self.process_new_lines(file_name)
 
-    def process_new_lines(self, file_name):
-        """
-        Read only the new lines appended to file_name since last check.
-        For each new line, we:
-          1) Print it to console with an HH:MM timestamp
-          2) Post it to Discord
-        """
-        current_offset = self.file_offsets[file_name]
-        new_offset = os.path.getsize(file_name)
-
-        if new_offset < current_offset:
-            # File might have been truncated or rotated; reset
-            current_offset = 0
-
-        if new_offset > current_offset:
-            # Read new lines
-            with open(file_name, "r", encoding="utf-8") as f:
-                f.seek(current_offset)
-                new_data = f.read()
-                self.file_offsets[file_name] = new_offset  # update offset
-
-            lines = new_data.splitlines()
-            for line in lines:
-                if line.strip():
-                    # Print to console with HH:MM timestamp
-                    hhmm = datetime.datetime.now().strftime("%H:%M")
-                    print(f"[{hhmm}] {file_name} -> {line}")
-
-                    # Post to Discord
-                    post_to_discord(
-                        DISCORD_CHANNEL_ID,
-                        f"**{file_name}** - {line}"
-                    )
+def load_existing_headlines(csv_filename):
+    """
+    Reads the CSV file if it exists, and returns a set of all headlines
+    previously stored. This ensures we don't re-publish duplicates across runs.
+    """
+    existing = set()
+    if os.path.exists(csv_filename):
+        with open(csv_filename, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 2:
+                    # Each row is [timestamp, headline]
+                    headline = row[1]
+                    existing.add(headline)
+    return existing
 
 
 def main():
-    # Determine the directory to watch: same as this script
-    watch_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_filename = "flylines.csv"
 
-    # Create our event handler for multiple CSVs
-    event_handler = MultiCSVHandler(CSV_FILES_TO_WATCH)
+    print("DEBUG: Connecting to Chrome on port 9222...")
+    browser = pychrome.Browser(url="http://127.0.0.1:9222")
 
-    # Create and start the observer
-    observer = Observer()
-    observer.schedule(event_handler, watch_dir, recursive=False)
-    observer.start()
+    # Attach to the tab
+    try:
+        fly_tab = attach_to_fly_tab(browser, "Breaking News - The Fly")
+    except RuntimeError as e:
+        print(f"ERROR: {e}")
+        beep_error()
+        return
 
-    print("Monitoring CSV changes in:", watch_dir)
-    print("Watching files:", CSV_FILES_TO_WATCH)
-    print("(Press Ctrl+C to stop)")
+    # Load existing headlines so we don't publish duplicates across runs
+    seen_headlines = load_existing_headlines(csv_filename)
+    print(f"DEBUG: Loaded {len(seen_headlines)} existing headlines from {csv_filename}.")
+
+    print("DEBUG: Beginning monitoring by dumping entire HTML every 3 seconds (Press Ctrl+C to stop).")
 
     try:
         while True:
-            time.sleep(1)
+            try:
+                # Dump entire HTML
+                html_text = dump_full_html(fly_tab)
+
+                # Parse with BeautifulSoup
+                headlines = parse_headlines_from_html(html_text)
+                print(f"DEBUG: Found {len(headlines)} headlines in the HTML.")
+
+                # Identify new items
+                new_items = [h for h in headlines if h not in seen_headlines]
+
+                if new_items:
+                    with open(csv_filename, "a", newline="", encoding="utf-8") as csvfile:
+                        writer = csv.writer(csvfile)
+                        for headline in new_items:
+                            seen_headlines.add(headline)
+                            timestamp = datetime.datetime.now().isoformat()
+
+                            # Print to console with a short HH:MM stamp
+                            hhmm = datetime.datetime.now().strftime("%H:%M")
+                            print(f"[{hhmm}] New headline -> {headline}")
+
+                            # Write to CSV
+                            writer.writerow([timestamp, headline])
+
+                time.sleep(3)  # Sleep 3 seconds before next dump
+
+            except pychrome.exceptions.RuntimeException as re:
+                print(f"ERROR: RuntimeException occurred: {re}")
+                beep_error()
+                # Attempt to re-locate & re-attach
+                time.sleep(5)
+                try:
+                    fly_tab = attach_to_fly_tab(browser, "Breaking News - The Fly")
+                except RuntimeError as e:
+                    print(f"ERROR: {e}")
+                    beep_error()
+                    continue  # keep retrying
+
+            except Exception as e:
+                print(f"ERROR: Unexpected exception: {e}")
+                beep_error()
+                time.sleep(5)
+
     except KeyboardInterrupt:
-        print("Stopping observer...")
-        observer.stop()
-    observer.join()
+        print("Monitoring stopped by user (KeyboardInterrupt).")
+    finally:
+        # Cleanly stop the tab session
+        try:
+            print("DEBUG: Stopping the tab session and exiting...")
+            fly_tab.stop()
+        except:
+            pass
 
 
 if __name__ == "__main__":
