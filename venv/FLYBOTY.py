@@ -1,25 +1,26 @@
 """
 Monitors headlines on the "Breaking News - The Fly" page by dumping the entire HTML every 3 seconds
-and parsing it with BeautifulSoup.
+and parsing it with BeautifulSoup, while avoiding duplicates that are already in flylines.csv.
 
 Steps:
 1) Attaches to the correct tab in Chrome (which must be running with --remote-debugging-port=9222).
-2) Every 3 seconds:
+2) Loads existing headlines from flylines.csv so we never re-publish duplicates.
+3) Every 3 seconds:
    - Evaluates document.documentElement.outerHTML
    - Parses the HTML with BeautifulSoup
    - Finds all <a class="newsTitleLink"> elements
-   - Checks for new headlines
-   - Writes them to a CSV file with timestamps
-3) Emits a beep on Windows if an error occurs (and tries to recover).
-4) Prints debug messages to the console.
+   - Checks for new headlines (not in CSV)
+   - Writes them to flylines.csv with timestamps
+4) Emits a beep on Windows if an error occurs (and tries to recover).
+5) Prints debug messages to the console, including a short HH:MM timestamp for new headlines.
 """
 
+import os
 import pychrome
 import time
 import datetime
 import csv
 
-# For HTML parsing
 from bs4 import BeautifulSoup
 
 # For Windows beep
@@ -29,6 +30,7 @@ try:
 except ImportError:
     HAVE_WINSOUND = False
 
+
 def beep_error():
     """Emit a triple beep sequence on Windows to alert of an error."""
     if not HAVE_WINSOUND:
@@ -37,6 +39,7 @@ def beep_error():
     for _ in range(3):
         winsound.Beep(1000, 500)  # frequency=1000 Hz, duration=500 ms
         time.sleep(0.1)
+
 
 def attach_to_fly_tab(browser, target_title="Breaking News - The Fly"):
     """
@@ -72,6 +75,7 @@ def attach_to_fly_tab(browser, target_title="Breaking News - The Fly"):
 
     raise RuntimeError(f"Could not locate a tab titled '{target_title}'")
 
+
 def dump_full_html(tab):
     """
     Uses pychrome to evaluate document.documentElement.outerHTML
@@ -82,25 +86,38 @@ def dump_full_html(tab):
     html_content = result.get("result", {}).get("value", "")
     return html_content
 
+
 def parse_headlines_from_html(html_text):
     """
     Given a string of HTML, parse it with BeautifulSoup and return
     a list of headlines found in <a class="newsTitleLink">.
     """
     soup = BeautifulSoup(html_text, "html.parser")
-
-    # If needed, you could be more specific and locate the table:
-    # table = soup.select_one('.news_table.today.first_table')
-    # if not table: ...
-    # but let's just search the entire doc for a.newsTitleLink
     headline_links = soup.select('a.newsTitleLink')
-
     headlines = []
     for link in headline_links:
         text = link.get_text(strip=True)
         if text:
             headlines.append(text)
     return headlines
+
+
+def load_existing_headlines(csv_filename):
+    """
+    Reads the CSV file if it exists, and returns a set of all headlines
+    previously stored. This ensures we don't re-publish duplicates across runs.
+    """
+    existing = set()
+    if os.path.exists(csv_filename):
+        with open(csv_filename, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 2:
+                    # Each row is [timestamp, headline]
+                    headline = row[1]
+                    existing.add(headline)
+    return existing
+
 
 def main():
     csv_filename = "flylines.csv"
@@ -116,7 +133,9 @@ def main():
         beep_error()
         return
 
-    seen_headlines = set()
+    # Load existing headlines so we don't publish duplicates across runs
+    seen_headlines = load_existing_headlines(csv_filename)
+    print(f"DEBUG: Loaded {len(seen_headlines)} existing headlines from {csv_filename}.")
 
     print("DEBUG: Beginning monitoring by dumping entire HTML every 3 seconds (Press Ctrl+C to stop).")
 
@@ -134,14 +153,18 @@ def main():
                 new_items = [h for h in headlines if h not in seen_headlines]
 
                 if new_items:
-                    # Append them to CSV with timestamps
                     with open(csv_filename, "a", newline="", encoding="utf-8") as csvfile:
                         writer = csv.writer(csvfile)
                         for headline in new_items:
                             seen_headlines.add(headline)
                             timestamp = datetime.datetime.now().isoformat()
+
+                            # Print to console with a short HH:MM stamp
+                            hhmm = datetime.datetime.now().strftime("%H:%M")
+                            print(f"[{hhmm}] New headline -> {headline}")
+
+                            # Write to CSV
                             writer.writerow([timestamp, headline])
-                            print(f"DEBUG: New headline appended: {headline}")
 
                 time.sleep(3)  # Sleep 3 seconds before next dump
 
@@ -171,6 +194,7 @@ def main():
             fly_tab.stop()
         except:
             pass
+
 
 if __name__ == "__main__":
     main()
