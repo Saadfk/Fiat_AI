@@ -3,6 +3,7 @@ import time
 import csv
 import requests
 import datetime
+import re
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -76,11 +77,12 @@ class MultiCSVHandler(FileSystemEventHandler):
     def process_new_lines(self, file_name):
         """
         Read only the new lines appended to file_name since the last check.
-        For each new line, if it hasn’t been posted before:
-          1) Print it to console with an HH:MM timestamp
-          2) Post it to Discord using an embed that includes:
+        For each new line that hasn't been posted before:
+          1) Remove any extra timestamp from the CSV line (e.g. "YYYY-MM-DD HH:MM:SS,")
+          2) Print to console with an HH:MM timestamp
+          3) Post to Discord using an embed that includes:
              - A title: "RTRS" (orange) for headlines.csv or "FLY" (blue) for flylines.csv
-             - The current time (hh:mm format) and the new line as the description
+             - The current time (hh:mm) and the cleaned line as the description
         """
         current_offset = self.file_offsets[file_name]
         new_offset = os.path.getsize(file_name)
@@ -105,6 +107,9 @@ class MultiCSVHandler(FileSystemEventHandler):
                         continue  # Skip duplicate
                     self.posted_lines[file_name].add(line)
 
+                    # Remove an embedded timestamp if present (e.g. "2025-02-23 23:14:46,")
+                    cleaned_line = re.sub(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\s*', '', line).strip()
+
                     # Get current timestamp in hh:mm format
                     hhmm = datetime.datetime.now().strftime("%H:%M")
 
@@ -119,15 +124,15 @@ class MultiCSVHandler(FileSystemEventHandler):
                         title = file_name
                         color = 0
 
-                    # Create an embed payload with the timestamp and line content
+                    # Create an embed payload with the timestamp and cleaned line content
                     embed = {
                         "title": title,
-                        "description": f"[{hhmm}] {line}",
+                        "description": f"[{hhmm}] {cleaned_line}",
                         "color": color
                     }
 
                     # Print to console
-                    print(f"[{hhmm}] {file_name} -> {line}")
+                    print(f"[{hhmm}] {file_name} -> {cleaned_line}")
                     # Post to Discord using embed
                     post_to_discord(DISCORD_CHANNEL_ID, embed=embed)
 
