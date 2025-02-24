@@ -45,7 +45,7 @@ class MultiCSVHandler(FileSystemEventHandler):
     A FileSystemEventHandler that tracks multiple CSV files for appended lines.
     For each file, we store:
       - the last file offset so that only truly new lines are processed
-      - a set of lines already posted to avoid duplicates
+      - a set of cleaned lines already posted to avoid duplicates
     """
 
     def __init__(self, csv_files):
@@ -54,7 +54,7 @@ class MultiCSVHandler(FileSystemEventHandler):
 
         # Track the file offsets so we only read truly new lines
         self.file_offsets = {}
-        # Track lines that have already been posted to avoid duplicates
+        # Track cleaned lines that have already been posted to avoid duplicates
         self.posted_lines = {}
         for f in csv_files:
             if os.path.exists(f):
@@ -78,9 +78,10 @@ class MultiCSVHandler(FileSystemEventHandler):
         """
         Read only the new lines appended to file_name since the last check.
         For each new line that hasn't been posted before:
-          1) Remove any extra timestamp from the CSV line (e.g. "YYYY-MM-DD HH:MM:SS,")
-          2) Print to console with an HH:MM timestamp
-          3) Post to Discord using an embed that includes:
+          1) Remove any embedded timestamp (supporting both "YYYY-MM-DD HH:MM:SS," and "YYYY-MM-DDTHH:MM:SS.ssssss,")
+          2) For fly news, remove the "Fly " prefix if present
+          3) Print to console with an HH:MM timestamp
+          4) Post to Discord using an embed that includes:
              - A title: "RTRS" (orange) for headlines.csv or "FLY" (blue) for flylines.csv
              - The current time (hh:mm) and the cleaned line as the description
         """
@@ -102,13 +103,19 @@ class MultiCSVHandler(FileSystemEventHandler):
             lines = new_data.splitlines()
             for line in lines:
                 if line.strip():
-                    # Check for duplicate lines before posting
-                    if line in self.posted_lines[file_name]:
-                        continue  # Skip duplicate
-                    self.posted_lines[file_name].add(line)
+                    # Remove any leading timestamp.
+                    # This regex handles both "YYYY-MM-DD HH:MM:SS," and "YYYY-MM-DDTHH:MM:SS.ssssss," formats.
+                    pattern = r'^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?,\s*'
+                    cleaned_line = re.sub(pattern, '', line).strip()
 
-                    # Remove an embedded timestamp if present (e.g. "2025-02-23 23:14:46,")
-                    cleaned_line = re.sub(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\s*', '', line).strip()
+                    # For fly news, remove the "Fly " prefix if present
+                    if file_name == "flylines.csv" and cleaned_line.startswith("Fly "):
+                        cleaned_line = cleaned_line[len("Fly "):].strip()
+
+                    # Check for duplicates using the cleaned text
+                    if cleaned_line in self.posted_lines[file_name]:
+                        continue  # Skip duplicate
+                    self.posted_lines[file_name].add(cleaned_line)
 
                     # Get current timestamp in hh:mm format
                     hhmm = datetime.datetime.now().strftime("%H:%M")
