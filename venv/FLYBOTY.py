@@ -1,15 +1,17 @@
 """
-Monitors headlines on the "Breaking News - The Fly" page by dumping the entire HTML every 3 seconds
-and parsing it with BeautifulSoup, while avoiding duplicates that are already in flylines.csv.
+Monitors headlines on the "Breaking News - The Fly" page by forcibly reloading
+the page every 3 seconds, then parsing the entire HTML with BeautifulSoup.
 
 Steps:
 1) Attaches to the correct tab in Chrome (which must be running with --remote-debugging-port=9222).
 2) Loads existing headlines from flylines.csv so we never re-publish duplicates.
 3) Every 3 seconds:
+   - Calls Page.reload to refresh the page
+   - Waits 2 seconds for the page to load
    - Evaluates document.documentElement.outerHTML
    - Parses the HTML with BeautifulSoup
    - Finds all <a class="newsTitleLink"> elements
-   - Checks for new headlines (not in CSV)
+   - Checks for new headlines
    - Writes them to flylines.csv with timestamps
 4) Emits a beep on Windows if an error occurs (and tries to recover).
 5) Prints debug messages to the console, including a short HH:MM timestamp for new headlines.
@@ -76,6 +78,14 @@ def attach_to_fly_tab(browser, target_title="Breaking News - The Fly"):
     raise RuntimeError(f"Could not locate a tab titled '{target_title}'")
 
 
+def refresh_page(tab):
+    # print("DEBUG: Refreshing the page...")
+    # Pass arguments as keyword args, not a dict
+    tab.call_method("Page.reload", ignoreCache=True)
+    time.sleep(4)  # Wait a bit for the page to reload
+
+
+
 def dump_full_html(tab):
     """
     Uses pychrome to evaluate document.documentElement.outerHTML
@@ -137,19 +147,22 @@ def main():
     seen_headlines = load_existing_headlines(csv_filename)
     print(f"DEBUG: Loaded {len(seen_headlines)} existing headlines from {csv_filename}.")
 
-    print("DEBUG: Beginning monitoring by dumping entire HTML every 3 seconds (Press Ctrl+C to stop).")
+    print("DEBUG: Beginning monitoring by reloading page every 3 seconds (Press Ctrl+C to stop).")
 
     try:
         while True:
             try:
-                # Dump entire HTML
+                # 1) Refresh the page
+                refresh_page(fly_tab)
+
+                # 2) Dump entire HTML
                 html_text = dump_full_html(fly_tab)
 
-                # Parse with BeautifulSoup
+                # 3) Parse with BeautifulSoup
                 headlines = parse_headlines_from_html(html_text)
-                print(f"DEBUG: Found {len(headlines)} headlines in the HTML.")
+                #print(f"DEBUG: Found {len(headlines)} headlines in the HTML.")
 
-                # Identify new items
+                # 4) Identify new items
                 new_items = [h for h in headlines if h not in seen_headlines]
 
                 if new_items:
@@ -166,7 +179,8 @@ def main():
                             # Write to CSV
                             writer.writerow([timestamp, headline])
 
-                time.sleep(3)  # Sleep 3 seconds before next dump
+                # 5) Wait 1 more second to make a total of ~3 seconds cycle
+                time.sleep(1)
 
             except pychrome.exceptions.RuntimeException as re:
                 print(f"ERROR: RuntimeException occurred: {re}")
