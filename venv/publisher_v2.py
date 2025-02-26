@@ -8,14 +8,30 @@ import re
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# Import your bot token from Keys.py
+# Discord
 from Keys import DISCORD_BOT_TOKEN
-
-# ID of the Discord channel where you want to post new lines
 DISCORD_CHANNEL_ID = 855359994547011604
 
-# CSV files we want to watch (in the same directory as this script)
+# CSV files we want to watch
 CSV_FILES_TO_WATCH = ["headlines.csv", "flylines.csv"]
+
+#################### NEW IMPORTS ####################
+from usage_tracker import UsageTracker
+from headline_aggregator import HeadlineAggregator
+
+# Suppose you have a publisher.py with your post_to_twitter function
+from publisher import post_to_twitter
+# from publisher import post_to_linkedin  # if needed
+
+# Create a usage tracker: 100 tweets in 24h
+twitter_usage = UsageTracker(
+    usage_file="tweet_usage.json",
+    max_attempts=100,
+    time_window=24*3600
+)
+
+# Create a single aggregator for all lines (or you could do one per file if you prefer)
+aggregator = HeadlineAggregator(flush_interval=5)
 
 
 def post_to_discord(channel_id, message=None, embed=None):
@@ -43,9 +59,6 @@ def post_to_discord(channel_id, message=None, embed=None):
 class MultiCSVHandler(FileSystemEventHandler):
     """
     A FileSystemEventHandler that tracks multiple CSV files for appended lines.
-    For each file, we store:
-      - the last file offset so that only truly new lines are processed
-      - a set of cleaned lines already posted to avoid duplicates
     """
 
     def __init__(self, csv_files):
@@ -78,18 +91,16 @@ class MultiCSVHandler(FileSystemEventHandler):
         """
         Read only the new lines appended to file_name since the last check.
         For each new line that hasn't been posted before:
-          1) Remove any embedded timestamp (supporting both "YYYY-MM-DD HH:MM:SS," and "YYYY-MM-DDTHH:MM:SS.ssssss,")
+          1) Remove any embedded timestamp
           2) For fly news, remove the "Fly " prefix if present
-          3) Print to console with an HH:MM timestamp
-          4) Post to Discord using an embed that includes:
-             - A title: "RTRS" (orange) for headlines.csv or "FLY" (blue) for flylines.csv
-             - The current time (hh:mm) and the cleaned line as the description
+          3) Add it to the aggregator (instead of immediately tweeting)
+          4) Post to Discord as usual (one by one) or you could aggregate that too
         """
         current_offset = self.file_offsets[file_name]
         new_offset = os.path.getsize(file_name)
 
+        # Handle file truncation
         if new_offset < current_offset:
-            # File might have been truncated or rotated; reset and clear duplicates
             current_offset = 0
             self.posted_lines[file_name].clear()
 
@@ -103,55 +114,50 @@ class MultiCSVHandler(FileSystemEventHandler):
             lines = new_data.splitlines()
             for line in lines:
                 if line.strip():
-                    # Remove any leading timestamp.
-                    # This regex handles both "YYYY-MM-DD HH:MM:SS," and "YYYY-MM-DDTHH:MM:SS.ssssss," formats.
+                    # Remove leading timestamp
                     pattern = r'^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?,\s*'
                     cleaned_line = re.sub(pattern, '', line).strip()
 
-                    # For fly news, remove the "Fly " prefix if present
+                    # Remove "Fly " prefix if in flylines.csv
                     if file_name == "flylines.csv" and cleaned_line.startswith("Fly "):
                         cleaned_line = cleaned_line[len("Fly "):].strip()
 
-                    # Check for duplicates using the cleaned text
+                    # Check for duplicates
                     if cleaned_line in self.posted_lines[file_name]:
-                        continue  # Skip duplicate
+                        continue
                     self.posted_lines[file_name].add(cleaned_line)
 
-                    # Get current timestamp in hh:mm format
-                    hhmm = datetime.datetime.now().strftime("%H:%M")
+                    # Add to aggregator
+                    aggregator.add_line(f"{file_name.upper()}: {cleaned_line}")
 
-                    # Set embed title and color based on the CSV file name
+                    # Also post to Discord individually (or you can aggregate):
+                    hhmm = datetime.datetime.now().strftime("%H:%M")
                     if file_name == "headlines.csv":
                         title = "RTRS"
-                        color = 16753920  # Orange (hex: FFA500)
+                        color = 16753920  # Orange
                     elif file_name == "flylines.csv":
                         title = "FLY"
-                        color = 255  # Blue (hex: 0000FF)
+                        color = 255       # Blue
                     else:
                         title = file_name
                         color = 0
 
-                    # Create an embed payload with the timestamp and cleaned line content
                     embed = {
                         "title": title,
                         "description": f"[{hhmm}] {cleaned_line}",
                         "color": color
                     }
+                    post_to_discord(DISCORD_CHANNEL_ID, embed=embed)
 
                     # Print to console
                     print(f"[{hhmm}] {file_name} -> {cleaned_line}")
-                    # Post to Discord using embed
-                    post_to_discord(DISCORD_CHANNEL_ID, embed=embed)
 
 
 def main():
-    # Determine the directory to watch: same as this script
     watch_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Create our event handler for multiple CSVs
     event_handler = MultiCSVHandler(CSV_FILES_TO_WATCH)
 
-    # Create and start the observer
+    from watchdog.observers import Observer
     observer = Observer()
     observer.schedule(event_handler, watch_dir, recursive=False)
     observer.start()
@@ -163,6 +169,25 @@ def main():
     try:
         while True:
             time.sleep(1)
+            # Check if aggregator is ready to flush
+            if aggregator.should_flush():
+                # Combine lines into one message
+                combined_message = aggregator.flush()
+
+                # If we exceed tweet length, you may want to chunk it,
+                # but here's a simple approach:
+                if len(combined_message) > 280:
+                    # Quick demonstration: trim or handle in multiple tweets
+                    combined_message = combined_message[:280] + "..."
+
+                # Check usage limit
+                if twitter_usage.can_post():
+                    twitter_usage.record_post()
+                    # Actually post the aggregated tweet
+                    hhmm = datetime.datetime.now().strftime("%H:%M")
+                    post_to_twitter(f"[{hhmm} Aggregated]\n{combined_message}")
+                else:
+                    print("SKIPPED TWEET (limit reached for today).")
     except KeyboardInterrupt:
         print("Stopping observer...")
         observer.stop()

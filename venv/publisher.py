@@ -29,21 +29,27 @@ import requests
 from requests_oauthlib import OAuth1
 import Keys
 
+import requests
+
+
+import requests
+from requests_oauthlib import OAuth1
+import Keys
+
 def post_to_twitter(content):
     url = "https://api.twitter.com/2/tweets"
 
-    # OAuth1 Authentication
+    # OAuth 1.0a User Context
     auth = OAuth1(
-        Keys.TWITTER_CONSUMER_KEY,
-        Keys.TWITTER_CONSUMER_SECRET,
-        Keys.TWITTER_ACCESS_TOKEN,
-        Keys.TWITTER_ACCESS_SECRET,
+        Keys.API_Key,            # "API Key"
+        Keys.API_Key_Secret,     # "API Key Secret"
+        Keys.Access_Token,       # "Access Token"
+        Keys.Access_Token_Secret # "Access Token Secret"
     )
 
-    # Post content directly (no splitting)
     payload = {"text": content}
-
     response = requests.post(url, auth=auth, json=payload)
+
     if response.status_code == 201:
         tweet_id = response.json().get("data", {}).get("id")
         print(f"Posted tweet: {content}")
@@ -51,7 +57,6 @@ def post_to_twitter(content):
     else:
         print(f"Failed to post to Twitter: {response.text}")
         return None
-
 
 def post_to_linkedin(content):
     url = "https://api.linkedin.com/v2/ugcPosts"
