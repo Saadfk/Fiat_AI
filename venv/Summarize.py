@@ -10,7 +10,7 @@ client = OpenAI(api_key=api_key)  # Using OpenAI client as recommended in the la
 # Directory to monitor
 MONITOR_DIR = r"C:\Users\User\Dropbox\Current\2025"
 
-def list_recent_files(directory, count=10):
+def list_recent_files(directory, count=20):
     """Retrieve the most recent files (by creation time) in the directory (including subfolders)."""
     all_files = []
     for root, dirs, files in os.walk(directory):
@@ -40,7 +40,7 @@ while True:
     elif command == 'r':
         # Refresh and list recent files
         try:
-            recent_files = list_recent_files(MONITOR_DIR, count=10)
+            recent_files = list_recent_files(MONITOR_DIR, count=20)
             if not recent_files:
                 print("No files found in the directory yet.")
         except Exception as e:
@@ -93,7 +93,7 @@ while True:
 
         # Prepare prompt for summarization (you can adjust the system/user messages as needed)
         prompt_message = (
-            "Summarize in bullet points very succinctly, focus on the opinions not the data:\n" + text_content
+            "Summarize in bullet points very succinctly, focus on the strongest, most direct opinions not the data or the generalized statements:\n" + text_content
         )
         messages = [
             {"role": "system", "content": "You are a hedge fund analyst"},

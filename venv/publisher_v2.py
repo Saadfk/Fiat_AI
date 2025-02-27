@@ -128,7 +128,7 @@ class MultiCSVHandler(FileSystemEventHandler):
                     self.posted_lines[file_name].add(cleaned_line)
 
                     # Add to aggregator
-                    aggregator.add_line(f"{file_name.upper()}: {cleaned_line}")
+                    aggregator.add_line(f"{cleaned_line}")
 
                     # Also post to Discord individually (or you can aggregate):
                     hhmm = datetime.datetime.now().strftime("%H:%M")
@@ -185,7 +185,7 @@ def main():
                     twitter_usage.record_post()
                     # Actually post the aggregated tweet
                     hhmm = datetime.datetime.now().strftime("%H:%M")
-                    post_to_twitter(f"[{hhmm} Aggregated]\n{combined_message}")
+                    post_to_twitter(f"[{hhmm}]\n{combined_message}")
                 else:
                     print("SKIPPED TWEET (limit reached for today).")
     except KeyboardInterrupt:
